@@ -1,0 +1,18 @@
+&share
+  variable_list_file='./varlist.txt'
+  input_grid_type='mpas'
+  data_files_input_grid='./diag.2019-05-16_01.00.00.nc'
+  file_target_grid='/glade/campaign/mmm/parc/schwartz/HRRR_v4experimental_geo_em.d01.nc'
+  target_grid_is_regional = .true.,
+  output_file='./interp_output.nc'
+  esmf_log=.false.
+  start_time = '2019-05-16_00:00:00'
+  valid_time = '2019-05-16_01:00:00'
+/
+&mpas
+  file_input_grid_mpas='/glade/work/schwartz/MPAS/ch/MPASSIT/test/init.nc'
+/
+&fv3
+/
+&latlon
+/
