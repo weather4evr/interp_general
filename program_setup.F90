@@ -17,7 +17,7 @@
 
  ! Public variables
  type(ESMF_LogKind_Flag), public :: LogType 
- integer, parameter, public :: nfiles_max = 200
+ integer, parameter, public :: nfiles_max = 300
  logical, public :: esmf_input_mesh = .false.
  logical, public :: esmf_input_grid = .false.
  

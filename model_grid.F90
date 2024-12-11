@@ -66,6 +66,8 @@
                                             !< IDs of the nodes on present PET
  integer, public                        :: nCellsPerPET
                                             !< Number of cells on this PET
+ integer, public                        :: nNodesPerPET
+                                           !< Number of nodes on this PET
 
  type(esmf_mesh),  public               :: input_mesh ! used for MPAS input
                                            !< input grid esmf mesh object
@@ -154,11 +156,13 @@
  integer                      :: error, i, j, k, rc, n
  integer                      :: ncid,id_var, id_dim, dimsize, nVertThis
  integer                      :: nCells, nVertices, maxEdges, dimids(2)
+ integer                      :: actual_maxEdges
  integer                      :: cell_start, cell_end, dims(3), temp1, &
                                    temp2, temp3, temp(1), clb(1), cub(1)
  integer, allocatable         :: elemTypes2(:), vertOnCell(:,:), &
                                           nodesPET(:), nodeIDs_temp(:), &
                                           elementConn_temp(:), elementConn(:)
+ integer, allocatable         :: nEdgesOnCell(:)
  real(esmf_kind_r8), allocatable       :: latCell(:), lonCell(:), &
                                           latVert(:), lonVert(:), &
                                           nodeCoords(:), &
@@ -192,9 +196,17 @@
 
  nVert_input = nVertices
 
- nCellsPerPET = ceiling(real(nCells)/real(npets))
- cell_start = localpet*nCellsPerPET+1
- cell_end = min(localpet*nCellsPerPET+nCellsPerPET,nCells)
+  ! original algorithm from Larissa, which can lead to
+  !  nCellsPerPET < 0 for some meshes,
+  !  probably because of using "ceiling()"
+
+!nCellsPerPET = ceiling(real(nCells)/real(npets))
+!cell_start = localpet*nCellsPerPET+1
+!cell_end = min(localpet*nCellsPerPET+nCellsPerPET,nCells)
+!nCellsPerPET = cell_end - cell_start + 1
+
+ ! Get number of MPAS cells per processor, and starting/ending cells.
+ call para_range(1, nCells, npets, localpet, cell_start, cell_end)
  nCellsPerPET = cell_end - cell_start + 1
 
  !Get nVertLevels size
@@ -287,6 +299,24 @@
  error=nf90_get_var(ncid, id_var, start=(/1,cell_start/),count=(/maxEdges,nCellsPerPET/),values=vertOnCell)
  call netcdf_err(error, 'reading verticesOnCell')
 
+ ! Start CSS...it's possible that maxEdges in the dimensions could be something like 10, but 
+ !  actual number of maxEdges is really 6. Moreover, in this example, columns 7-10 could have
+ !  values > 0 for vertOnCell that are meaningless, but the code below for mesh generation won't like that.
+ ! So, figure out the actual number of maxEdges in the mesh.
+ ! Also, below, during mesh generation, check to see if we are > nEdgesOnCell for the ith point
+ allocate(nEdgesOnCell(nCells_input)) ! each processor has the whole mesh...probably not needed
+ if (localpet==0) print*,'- READ nEdgesOnCell ID'
+ error=nf90_inq_varid(ncid, 'nEdgesOnCell', id_var)
+ call netcdf_err(error, 'reading nEdgesOnCell id')
+ if (localpet==0) print*,'- READ nEdgesOnCell'
+ error=nf90_get_var(ncid, id_var, start=(/1/),count=(/nCells_input/),values=nEdgesOnCell)
+ call netcdf_err(error, 'reading nEdgesOnCell')
+ actual_maxEdges = maxval(nEdgesOnCell)  !CSS
+ if ( localpet == 0 .and. ( actual_maxEdges /= maxEdges)) then
+    write(*,*)'Actual number of maxEdges = ',actual_maxEdges
+ endif
+ ! End CSS
+
  error = nf90_close(ncid)
 
  ! Allocate and fill element corner coordinate array.
@@ -301,6 +331,53 @@
  k = 0
 
  if (localpet==0) print*, "- Create PET-local element connectivity "
+
+ if ( 1 == 1 ) then ! newest/latest method from MPASSIT
+
+    do i = cell_start, cell_end
+       j = i - cell_start + 1
+       elemIDs(j) = i
+    enddo
+
+    do i = 1,nCellsPerPET
+       j = elemIDs(i)
+       elemTypes2(i) = count(vertOnCell(:,j)/=0)
+       nVertThis = nVertThis + elemTypes2(i)
+       elemCoords(2*i-1) = lonCell(j)*180.0_esmf_kind_r8/PI
+       if (elemCoords(2*i-1) > 180.0_esmf_kind_r8) then
+          elemCoords(2*i-1) = elemCoords(2*i-1) - 360.0_esmf_kind_r8
+       endif
+       elemCoords(i*2) = latCell(j)*180.0_esmf_kind_r8/PI
+       elementConn_temp(maxEdges*(i-1)+1:maxEdges*i) = vertOnCell(:,j)
+    enddo
+    call unique_sort(elementConn_temp,maxEdges*nCellsPerPET,nodeIDs)
+    nNodesPerPET=size(nodeIDs)
+    allocate(nodeCoords(2*nNodesPerPET))
+    do j = 1,nNodesPerPET
+       i = nodeIDs(j)
+       nodeCoords(2*j-1) = lonVert(i)*180.0_esmf_kind_r8/PI
+       if (nodeCoords(2*j-1) > 180.0_esmf_kind_r8) then
+          nodeCoords(2*j-1) = nodeCoords(2*j-1) - 360.0_esmf_kind_r8
+       endif
+       nodeCoords(2*j) = latVert(i)*180.0_esmf_kind_r8/PI
+    enddo
+    allocate(elementConn(nVertThis))
+    nVertThis = 0
+    do i = 1,nCellsPerPET
+       k = elemIDs(i)
+       do j = 1,maxEdges
+         !if(vertOnCell(j,i)/=0) then
+         !temp = FINDLOC(nodeIDs,vertOnCell(j,elemIDs(i)))
+          if(vertOnCell(j,k)/=0) then
+             temp = FINDLOC(nodeIDs,vertOnCell(j,k))
+             elementConn(nVertThis+1) = temp(1)
+             nVertThis = nVertThis + 1
+          endif
+       enddo
+    enddo
+
+ else ! original method
+
  do i = cell_start,cell_end
     j = i - cell_start + 1
     elemIDs(j) = i
@@ -311,6 +388,8 @@
     endif
     elemCoords(2*j) = latCell(i)*180.0_esmf_kind_r8/PI
     do n = 1,maxEdges
+        if ( n > actual_maxEdges ) cycle ! CSS
+        if ( n > nEdgesOnCell(i) ) cycle ! CSS
         if (vertOnCell(n,i)>0) then
             nVertThis = nVertThis + 1
 
@@ -344,6 +423,10 @@
  nodeIDs = nodeIDs_temp(1:k)
  elementConn = elementConn_temp(1:nVertThis)
 
+ endif ! methods
+
+ write(*,*) localpet, cell_start, cell_end, nCellsPerPET
+
  if (localpet==0) print*, "- CREATE MESH -"
  input_mesh = ESMF_MeshCreate(parametricDim=2, &
                      spatialDim=2, &
@@ -364,6 +447,7 @@
  deallocate(elementConn_temp, elementConn)
  deallocate(nodeIDs_temp)
  deallocate(lonCell, latCell, lonVert, latVert,vertOnCell)
+ deallocate(nEdgesOnCell) ! CSS
 
  end subroutine define_input_grid_mpas
 
@@ -1054,24 +1138,6 @@
 
  end subroutine get_cell_corners
 
-subroutine unique_sort(val,nvals, final)
-    implicit none
-    integer, intent(in) :: nvals
-    integer, intent(in) :: val(nvals)
-    integer, intent(inout), allocatable :: final(:)
-    integer :: i = 0, min_val, max_val
-    integer, dimension(nvals) :: unique
-
-    min_val = minval(val)-1
-    max_val = maxval(val)
-    do while (min_val<max_val)
-        i = i+1
-        min_val = minval(val, mask=val>min_val)
-        unique(i) = min_val
-    enddo
-    allocate(final(i), source=unique(1:i))   !<-- Or, just use unique(1:i)
-end subroutine unique_sort
-
  subroutine cleanup_input_target_grid_data(localpet)
 
  implicit none
@@ -1118,5 +1184,43 @@ end subroutine unique_sort
  deallocate(target_units, target_longname)
 
  end subroutine cleanup_input_target_grid_data
+
+ subroutine unique_sort(val,nvals, final)
+   !implicit none
+    integer, intent(in) :: nvals
+    integer, intent(in) :: val(nvals)
+    integer, intent(inout), allocatable :: final(:)
+    integer :: i = 0, min_val, max_val
+    integer, dimension(nvals) :: unique
+
+    min_val = minval(val)-1
+    max_val = maxval(val)
+    do while (min_val<max_val)
+        min_val = minval(val, mask=val>min_val)
+        if (min_val>0) then
+          i = i+1
+          unique(i) = min_val
+        endif
+    enddo
+    allocate(final(i), source=unique(1:i))   !<-- Or, just use unique(1:i)
+ end subroutine unique_sort
+
+
+subroutine para_range(n1, n2, nprocs, irank, ista, iend)
+
+  integer, intent(in) :: n1, n2, nprocs, irank
+  integer, intent(out) :: ista, iend
+
+  integer :: iwork1, iwork2
+
+  iwork1 = (n2 - n1 + 1) / nprocs
+  iwork2 = mod(n2 - n1 + 1, nprocs)
+  ista = irank * iwork1 + n1 + min(irank, iwork2)
+  iend = ista + iwork1 - 1
+  if (iwork2 > irank) iend = iend + 1
+  return
+
+end subroutine para_range
+
 
  end module model_grid
